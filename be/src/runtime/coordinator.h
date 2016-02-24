@@ -357,11 +357,13 @@ class Coordinator {
   /// Total time spent in finalization (typically 0 except for INSERT into hdfs tables)
   RuntimeProfile::Counter* finalization_timer_;
 
-  /// Barrier that is released when all fragment instances have been started. Initialised
-  /// during StartRemoteFragments().
-  boost::scoped_ptr<CountingBarrier> fragment_start_barrier_;
+  /// Barrier that is released when all calls to ExecRemoteFragment() have
+  /// returned, successfully or not. Initialised during StartRemoteFragments().
+  boost::scoped_ptr<CountingBarrier> exec_complete_barrier_;
 
-  struct Filter {
+  struct FilterState {
+    TRuntimeFilterDesc desc;
+
     TPlanNodeId src;
     TPlanNodeId dst;
 
@@ -375,14 +377,20 @@ class Coordinator {
     /// destination plan fragment instances. Owned by the coordinator's object pool.
     BloomFilter* bloom_filter;
 
-    Filter() : bloom_filter(NULL) { }
+    /// Time at which first local filter arrived.
+    int64_t first_arrival_time;
+
+    /// Time at which all local filters arrived.
+    int64_t completion_time;
+
+    FilterState() : bloom_filter(NULL), first_arrival_time(0L), completion_time(0L) { }
   };
 
   /// Protects filter_routing_table_.
   SpinLock filter_lock_;
 
   /// Map from filter ID to filter.
-  typedef boost::unordered_map<int32_t, Filter> FilterRoutingTable;
+  typedef boost::unordered_map<int32_t, FilterState> FilterRoutingTable;
   FilterRoutingTable filter_routing_table_;
 
   RuntimeProfile::Counter* filters_received_;

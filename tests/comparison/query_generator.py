@@ -175,23 +175,27 @@ class QueryGenerator(object):
 
     if self.profile.use_where_clause():
       query.where_clause = self._create_where_clause(
-          from_clause.visible_table_exprs, table_exprs, table_alias_prefix)
+          from_clause.visible_table_exprs, table_alias_prefix)
 
     # If agg and non-agg SELECT items are present then a GROUP BY is required otherwise
     # it's optional and is effectively a "SELECT DISTINCT".
     if (select_clause.agg_items and select_clause.basic_items) \
         or (require_aggregate is None \
             and select_clause.basic_items \
+            and not select_clause.analytic_items \
+            and not select_clause.contains_approximate_types \
             and self.profile.use_group_by_clause()):
       group_by_items = [item for item in select_clause.basic_items
                         if not item.val_expr.is_constant]
+      # TODO: What if there are select_clause.analytic_items?
       if group_by_items:
         query.group_by_clause = GroupByClause(group_by_items)
 
     # Impala doesn't support DISTINCT with analytics or "SELECT DISTINCT" when
     # GROUP BY is used.
     if not select_clause.analytic_items \
-        and not (query.group_by_clause and not select_clause.agg_items) \
+        and not query.group_by_clause \
+        and not select_clause.contains_approximate_types \
         and self.profile.use_distinct():
       if select_clause.agg_items:
         self._enable_distinct_on_random_agg_items(select_clause.agg_items)
@@ -221,7 +225,11 @@ class QueryGenerator(object):
           table_exprs,
           allow_with_clause=False,
           select_item_data_types=select_item_data_types))
-      query.union_clause.all = self.profile.use_union_all()
+      if select_clause.contains_approximate_types or any(
+          q.select_clause.contains_approximate_types for q in query.union_clause.queries):
+        query.union_clause.all = True
+      else:
+        query.union_clause.all = self.profile.use_union_all()
 
     self.queries_under_construction.pop()
     if self.queries_under_construction:
@@ -282,23 +290,22 @@ class QueryGenerator(object):
     column_categories = ['-' for _ in select_item_data_types]
     if require_aggregate:
       column_categories[randint(0, len(column_categories) - 1)] = 'AGG'
-    # Assign AGG randomly to some columns based on profile weights
+    # Assign AGG and ANALYTIC some columns
     for i in range(len(column_categories)):
-      if self.profile._choose_from_weights(
-          self.profile.weights('SELECT_ITEM_CATEGORY')) == 'AGG':
-        column_categories[i] = 'AGG'
+      item_category = self.profile._choose_from_weights(
+          self.profile.weights('SELECT_ITEM_CATEGORY'))
+      if item_category in ('AGG', 'ANALYTIC'):
+        column_categories[i] = item_category
     agg_present = 'AGG' in column_categories
-    # Assign ANALYTIC and BASIC to some columns based on the profile weights.
+    # Assign BASIC to the remaining columns
     for i in range(len(column_categories)):
       if column_categories[i] == '-':
-        # If AGG column is present, BASIC can only be assigned to a column if it's not a
-        # Float.
-        if self.profile._choose_from_weights(
-            self.profile.weights('SELECT_ITEM_CATEGORY')) == 'BASIC' and not (
-            select_item_data_types[i] == Float and agg_present):
-          column_categories[i] = 'BASIC'
+        if select_item_data_types[i].is_approximate() and agg_present:
+          column_categories[i] = 'AGG'
         else:
-          column_categories[i] = 'ANALYTIC'
+          # If AGG column is present, BASIC can only be assigned to a column if it's not a
+          # Float.
+          column_categories[i] = 'BASIC'
 
     select_items = []
 
@@ -1120,6 +1127,15 @@ class QueryGenerator(object):
       candidate_table_exprs.extend(candidate_table_exprs.collections)
       if join_type == 'CROSS':
         table_expr = self._create_table_expr(candidate_table_exprs)
+      elif not self.profile.only_use_equality_join_predicates():
+        table_expr = self._create_table_expr(candidate_table_exprs)
+        join_clause = JoinClause(join_type, table_expr)
+        predicate = self._create_func_tree(Boolean, allow_subquery=False)
+        predicate = self._populate_func_with_vals(
+            predicate,
+            table_exprs=from_clause.visible_table_exprs)
+        join_clause.boolean_expr = predicate
+        return join_clause
       else:
         available_join_expr_types = set(from_clause.table_exprs.joinable_cols_by_type) \
             & set(candidate_table_exprs.col_types)
@@ -1190,21 +1206,23 @@ class QueryGenerator(object):
     return predicates[0]
 
   def _create_where_clause(self,
-      from_clause_table_exprs,
       table_exprs,
       table_alias_prefix):
     predicate = self._create_func_tree(Boolean, allow_subquery=True)
     predicate = self._populate_func_with_vals(
         predicate,
-        table_exprs=from_clause_table_exprs,
+        table_exprs=table_exprs,
         table_alias_prefix=table_alias_prefix)
-    if predicate.contains_subquery and not from_clause_table_exprs[0].alias:
+    if predicate.contains_subquery and not table_exprs[0].alias:
       # TODO: Figure out if an alias is really needed.
-      from_clause_table_exprs[0].alias = self.get_next_id()
+      table_exprs[0].alias = self.get_next_id()
     return WhereClause(predicate)
 
   def _create_having_clause(self, table_exprs, basic_select_item_exprs):
-    predicate = self._create_agg_func_tree(Boolean)
+    if self.profile.only_use_aggregates_in_having_clause():
+      predicate = self._create_agg_func_tree(Boolean)
+    else:
+      predicate = self._create_func_tree(Boolean, allow_subquery=False)
     predicate = self._populate_func_with_vals(
         predicate, table_exprs=table_exprs, val_exprs=basic_select_item_exprs)
     # https://issues.cloudera.org/browse/IMPALA-1423

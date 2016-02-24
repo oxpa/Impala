@@ -150,6 +150,7 @@ export IMPALA_GLOG_VERSION=0.3.2
 export IMPALA_GPERFTOOLS_VERSION=2.0
 export IMPALA_GTEST_VERSION=1.6.0
 export IMPALA_LLVM_VERSION=3.3
+export IMPALA_LLVM_DEBUG_VERSION=3.3
 export IMPALA_LLVM_ASAN_VERSION=3.7.0
 export IMPALA_LZ4_VERSION=svn
 export IMPALA_MIN_BOOST_VERSION=1.46.0
@@ -171,7 +172,11 @@ if [[ -n "$IMPALA_TOOLCHAIN" ]]; then
   IMPALA_GPERFTOOLS_VERSION+=-p1
   IMPALA_THRIFT_VERSION+=-p2
   IMPALA_RE2_VERSION+=-p1
-  IMPALA_LLVM_VERSION+=-p1
+  IMPALA_LLVM_VERSION+=-no-asserts-p1
+  # Debug builds should use the default release-with-assertions build from the toolchain
+  # Note that the default toolchain build of 3.7 and trunk is release with no assertions,
+  # so this will need to be revisited when upgrading the LLVM version.
+  IMPALA_LLVM_DEBUG_VERSION+=-p1
 fi
 
 if [[ $OSTYPE == "darwin"* ]]; then
@@ -197,12 +202,12 @@ else
   export IMPALA_CYRUS_SASL_INSTALL_DIR=${IMPALA_HOME}/thirdparty/cyrus-sasl-${IMPALA_CYRUS_SASL_VERSION}/build
 fi
 
-export IMPALA_HADOOP_VERSION=2.6.0-cdh5.7.0-SNAPSHOT
-export IMPALA_HBASE_VERSION=1.0.0-cdh5.7.0-SNAPSHOT
-export IMPALA_HIVE_VERSION=1.1.0-cdh5.7.0-SNAPSHOT
-export IMPALA_SENTRY_VERSION=1.5.1-cdh5.7.0-SNAPSHOT
-export IMPALA_LLAMA_VERSION=1.0.0-cdh5.7.0-SNAPSHOT
-export IMPALA_PARQUET_VERSION=1.5.0-cdh5.7.0-SNAPSHOT
+export IMPALA_HADOOP_VERSION=2.6.0-cdh5.7.0
+export IMPALA_HBASE_VERSION=1.2.0-cdh5.7.0
+export IMPALA_HIVE_VERSION=1.1.0-cdh5.7.0
+export IMPALA_SENTRY_VERSION=1.5.1-cdh5.7.0
+export IMPALA_LLAMA_VERSION=1.0.0-cdh5.7.0
+export IMPALA_PARQUET_VERSION=1.5.0-cdh5.7.0
 export IMPALA_MINIKDC_VERSION=1.0.0
 
 export IMPALA_FE_DIR=$IMPALA_HOME/fe
@@ -305,7 +310,13 @@ export LIBHDFS_OPTS="${LIBHDFS_OPTS}:${IMPALA_HOME}/be/build/debug/service"
 
 export ARTISTIC_STYLE_OPTIONS=$IMPALA_BE_DIR/.astylerc
 
-export JAVA_LIBRARY_PATH=${IMPALA_HOME}/thirdparty/snappy-${IMPALA_SNAPPY_VERSION}/build/lib
+if [[ -z "${IMPALA_TOOLCHAIN}" ]]; then
+  IMPALA_SNAPPY_PATH=${IMPALA_HOME}/thirdparty/snappy-${IMPALA_SNAPPY_VERSION}/build/lib
+else
+  IMPALA_SNAPPY_PATH=${IMPALA_TOOLCHAIN}/snappy-${IMPALA_SNAPPY_VERSION}/lib
+fi
+
+export JAVA_LIBRARY_PATH=${IMPALA_SNAPPY_PATH}
 
 # So that the frontend tests and PlanService can pick up libbackend.so
 # and other required libraries
@@ -317,7 +328,7 @@ LD_LIBRARY_PATH="${LD_LIBRARY_PATH-}"
 LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:`dirname ${LIB_JAVA}`:`dirname ${LIB_JSIG}`"
 LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:`dirname ${LIB_JVM}`:`dirname ${LIB_HDFS}`"
 LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${IMPALA_HOME}/be/build/debug/service"
-LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${IMPALA_HOME}/thirdparty/snappy-${IMPALA_SNAPPY_VERSION}/build/lib"
+LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${IMPALA_SNAPPY_PATH}"
 LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:$IMPALA_LZO/build"
 
 if [[ -n "$IMPALA_TOOLCHAIN" ]]; then

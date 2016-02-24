@@ -93,8 +93,12 @@ Status PartitionedHashJoinNode::Init(const TPlanNode& tnode, RuntimeState* state
   BOOST_FOREACH(const TRuntimeFilterDesc& filter, tnode.runtime_filters) {
     // If filter propagation not enabled, only consider building broadcast joins (that may
     // be consumed by this fragment).
-    if (!state->query_options().enable_runtime_filter_propagation &&
+    if (state->query_options().runtime_filter_mode != TRuntimeFilterMode::GLOBAL &&
         !filter.is_broadcast_join) {
+      continue;
+    }
+    if (state->query_options().disable_row_runtime_filtering &&
+        !filter.is_bound_by_partition_columns) {
       continue;
     }
     FilterContext filter_ctx;
@@ -320,11 +324,6 @@ PartitionedHashJoinNode::Partition::~Partition() {
 
 int64_t PartitionedHashJoinNode::Partition::EstimatedInMemSize() const {
   return build_rows_->byte_size() + HashTable::EstimateSize(build_rows_->num_rows());
-}
-
-int64_t PartitionedHashJoinNode::Partition::InMemSize() const {
-  DCHECK(hash_tbl_.get() != NULL);
-  return build_rows_->byte_size() + hash_tbl_->byte_size();
 }
 
 void PartitionedHashJoinNode::Partition::Close(RowBatch* batch) {
@@ -566,7 +565,7 @@ Status PartitionedHashJoinNode::SpillPartition(Partition** spilled_partition) {
       // IMPALA-1488: Do not spill partitions that already had matches, because we
       // are going to lose information and return wrong results.
       if (UNLIKELY(candidate->hash_tbl()->HasMatches())) continue;
-      mem += candidate->hash_tbl()->byte_size();
+      mem += candidate->hash_tbl()->ByteSize();
     }
     if (mem > max_freed_mem) {
       max_freed_mem = mem;

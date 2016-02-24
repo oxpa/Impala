@@ -136,13 +136,19 @@ Status HdfsScanNode::Init(const TPlanNode& tnode, RuntimeState* state) {
         Expr::CreateExprTrees(pool_, iter->second, &conjuncts_map_[iter->first]));
   }
 
+  const TQueryOptions& query_options = state->query_options();
   BOOST_FOREACH(const TRuntimeFilterDesc& filter, tnode.runtime_filters) {
+    if (query_options.disable_row_runtime_filtering &&
+        !filter.is_bound_by_partition_columns) {
+      continue;
+    }
+
     FilterContext filter_ctx;
     RETURN_IF_ERROR(Expr::CreateExprTree(pool_, filter.target_expr, &filter_ctx.expr));
     filter_ctx.filter = state->filter_bank()->RegisterFilter(filter, false);
 
     RuntimeProfile* profile = state->obj_pool()->Add(new RuntimeProfile(state->obj_pool(),
-            Substitute("Filter $0", filter.filter_id)));
+        Substitute("Filter $0", filter.filter_id)));
     runtime_profile_->AddChild(profile);
     filter_ctx.stats = state->obj_pool()->Add(
         new FilterStats(profile, filter.is_bound_by_partition_columns));
@@ -173,37 +179,28 @@ bool HdfsScanNode::FilePassesFilterPredicates(const vector<FilterContext>& filte
   return true;
 }
 
-bool HdfsScanNode::WaitForPartitionFilters(int32_t time_ms) {
+bool HdfsScanNode::WaitForRuntimeFilters(int32_t time_ms) {
   vector<string> arrived_filter_ids;
-  bool all_filters_arrived = true;
-  bool have_partition_filter = false;
   int32_t start = MonotonicMillis();
   for (auto& ctx: filter_ctxs_) {
-    if (ctx.filter->filter_desc().is_bound_by_partition_columns) {
-      have_partition_filter = true;
-      if (!ctx.filter->WaitForArrival(time_ms)) {
-        all_filters_arrived = false;
-      } else {
-        arrived_filter_ids.push_back(Substitute("$0", ctx.filter->filter_desc().filter_id));
-      }
+    if (ctx.filter->WaitForArrival(time_ms)) {
+      arrived_filter_ids.push_back(
+          Substitute("$0", ctx.filter->filter_desc().filter_id));
     }
   }
-  if (!have_partition_filter) return true;
   int32_t end = MonotonicMillis();
   const string& wait_time = PrettyPrinter::Print(end - start, TUnit::TIME_MS);
-  if (all_filters_arrived) {
-    runtime_profile()->AddInfoString("Partition filters",
+  if (arrived_filter_ids.size() == filter_ctxs_.size()) {
+    runtime_profile()->AddInfoString("Runtime filters",
         Substitute("All filters arrived. Waited $0", wait_time));
     VLOG_QUERY << "Filters arrived. Waited " << wait_time;
     return true;
   }
 
-  const string& filter_str = join(arrived_filter_ids, ", ");
-  runtime_profile()->AddInfoString("Partition filters",
-      Substitute("Only following filters arrived: $0, waited $1",
-          filter_str, wait_time));
-
-  VLOG_QUERY << "Partition filters did not arrive within " << wait_time;
+  const string& filter_str = Substitute("Only following filters arrived: $0, waited $1",
+      join(arrived_filter_ids, ", "), wait_time);
+  runtime_profile()->AddInfoString("Runtime filters", filter_str);
+  VLOG_QUERY << filter_str;
   return false;
 }
 
@@ -219,7 +216,7 @@ Status HdfsScanNode::GetNext(RuntimeState* state, RowBatch* row_batch, bool* eos
     if (state->query_options().runtime_filter_wait_time_ms > 0) {
       wait_time_ms = state->query_options().runtime_filter_wait_time_ms;
     }
-    WaitForPartitionFilters(wait_time_ms);
+    if (filter_ctxs_.size() > 0) WaitForRuntimeFilters(wait_time_ms);
     // Apply dynamic partition-pruning per-file.
     FileFormatsMap matching_per_type_files;
     BOOST_FOREACH(const FileFormatsMap::value_type& v, per_type_files_) {
@@ -1136,9 +1133,10 @@ Status HdfsScanNode::ProcessSplit(const vector<FilterContext>& filter_ctxs,
                             << " partition_id=" << partition_id
                             << "\n" << PrintThrift(runtime_state_->fragment_params());
 
-  // TODO: Re-enable scan-range filtering (see IMPALA-2992)
-  if (false && !PartitionPassesFilterPredicates(partition_id, FilterStats::SPLITS_KEY,
+  if (!PartitionPassesFilterPredicates(partition_id, FilterStats::SPLITS_KEY,
           filter_ctxs)) {
+    // Avoid leaking unread buffers in scan_range.
+    scan_range->Cancel(Status::CANCELLED);
     // Mark scan range as done.
     scan_ranges_complete_counter()->Add(1);
     progress_.Update(1);

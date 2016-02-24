@@ -24,10 +24,10 @@ import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.apache.hadoop.hive.metastore.MetaStoreUtils;
 import org.junit.Test;
 
 import com.cloudera.impala.analysis.TimestampArithmeticExpr.TimeUnit;
-import com.cloudera.impala.analysis.SqlScanner;
 import com.cloudera.impala.common.AnalysisException;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -1766,6 +1766,10 @@ public class ParserTest {
         "'f.jar' SYMBOL='class.Udf' COMMENT='hi'");
     ParsesOk("CREATE FUNCTION IF NOT EXISTS Foo() RETURNS INT LOCATION 'foo.jar' " +
         "SYMBOL='class.Udf'");
+    ParsesOk("CREATE FUNCTION foo LOCATION 'f.jar' SYMBOL='class.Udf'");
+    ParsesOk("CREATE FUNCTION db.foo LOCATION 'f.jar' SYMBOL='class.Udf'");
+    ParsesOk("CREATE FUNCTION IF NOT EXISTS foo LOCATION 'f.jar' SYMBOL='class.Udf'");
+    ParsesOk("CREATE FUNCTION IF NOT EXISTS db.foo LOCATION 'f.jar' SYMBOL='class.Udf'");
 
     // Try more interesting function names
     ParsesOk("CREATE FUNCTION User.Foo() RETURNS INT LOCATION 'a'");
@@ -1777,6 +1781,7 @@ public class ParserTest {
     ParserError("CREATE FUNCTION User.() RETURNS INT LOCATION 'a'");
     ParserError("CREATE FUNCTION User.Foo.() RETURNS INT LOCATION 'a'");
     ParserError("CREATE FUNCTION User..Foo() RETURNS INT LOCATION 'a'");
+    ParserError("CREATE FUNCTION Foo() LOCATION 'a.jar' SYMBOL='class.Udf");
     // Bad function name that parses but won't analyze.
     ParsesOk("CREATE FUNCTION A.B.C.D.Foo() RETURNS INT LOCATION 'a'");
 
@@ -1790,6 +1795,8 @@ public class ParserTest {
     ParserError("CREATE FUNCTION Foo() RETURNS INT SYMBOL='1' LOCATION 'a'");
     ParserError("CREATE FUNCTION Foo() RETURNS INT LOCATION 'a' SYMBOL");
     ParserError("CREATE FUNCTION Foo() RETURNS INT LOCATION 'a' SYMBOL='1' SYMBOL='2'");
+    ParserError("CREATE FUNCTION IF NOT EXISTS db.foo LOCATION 'f.jar' SYMBOL='1'" +
+         " SYMBOL='2'");
 
     // Missing arguments
     ParserError("CREATE FUNCTION Foo RETURNS INT LOCATION 'f.jar'");
@@ -2475,6 +2482,8 @@ public class ParserTest {
     ParsesOk("DROP AGGREGATE FUNCTION IF EXISTS Foo()");
     ParsesOk("DROP FUNCTION IF EXISTS Foo(INT)");
     ParsesOk("DROP FUNCTION IF EXISTS Foo(INT...)");
+    ParsesOk("DROP FUNCTION Foo");
+    ParsesOk("DROP FUNCTION IF EXISTS Foo");
 
     ParserError("DROP");
     ParserError("DROP Foo");
@@ -2500,11 +2509,11 @@ public class ParserTest {
     ParserError("DROP VIEW Foo purge");
     ParserError("DROP FUNCTION Foo)");
     ParserError("DROP FUNCTION Foo(");
-    ParserError("DROP FUNCTION Foo");
     ParserError("DROP FUNCTION Foo PURGE");
     ParserError("DROP FUNCTION");
     ParserError("DROP BLAH FUNCTION");
     ParserError("DROP IF EXISTS FUNCTION Foo()");
+    ParserError("DROP FUNCTION Foo RETURNS INT");
     ParserError("DROP FUNCTION Foo(INT) RETURNS INT");
     ParserError("DROP FUNCTION Foo.(INT) RETURNS INT");
     ParserError("DROP FUNCTION Foo..(INT) RETURNS INT");
@@ -2583,6 +2592,7 @@ public class ParserTest {
     TypeDefsParseOk("DOUBLE", "REAL");
     TypeDefsParseOk("STRING");
     TypeDefsParseOk("CHAR(1)", "CHAR(20)");
+    TypeDefsParseOk("VARCHAR(1)", "VARCHAR(20)");
     TypeDefsParseOk("BINARY");
     TypeDefsParseOk("DECIMAL");
     TypeDefsParseOk("TIMESTAMP");
@@ -2608,6 +2618,16 @@ public class ParserTest {
     TypeDefsParseOk("STRUCT<f:TINYINT>");
     TypeDefsParseOk("STRUCT<a:TINYINT, b:BIGINT, c:DOUBLE>");
     TypeDefsParseOk("STRUCT<a:TINYINT COMMENT 'x', b:BIGINT, c:DOUBLE COMMENT 'y'>");
+
+    // Test that struct-field names can be identifiers or keywords even if unquoted.
+    // This behavior is needed to parse type strings from the Hive Metastore which
+    // may have unquoted identifiers corresponding to keywords.
+    for (String keyword: SqlScanner.keywordMap.keySet()) {
+      // Skip keywords that are not valid field/column names in the Metastore.
+      if (!MetaStoreUtils.validateName(keyword)) continue;
+      String structType = "STRUCT<" + keyword + ":INT>";
+      TypeDefsParseOk(structType);
+    }
 
     TypeDefsError("CHAR()");
     TypeDefsError("CHAR(1, 1)");

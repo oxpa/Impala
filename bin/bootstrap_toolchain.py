@@ -26,6 +26,7 @@
 #
 #     python bootstrap_toolchain.py
 import sh
+import shutil
 import os
 import sys
 import re
@@ -45,19 +46,25 @@ OS_MAPPING = {
   "ubuntu14.04" : "ec2-package-ubuntu-14-04"
 }
 
+def try_get_release_label():
+  """Gets the right package label from the OS version. Return None if not found."""
+  try:
+    return get_release_label()
+  except:
+    return None
+
 def get_release_label():
-  """Gets the right package label from the OS version"""
+  """Gets the right package label from the OS version. Raise exception if not found."""
   release = "".join(map(lambda x: x.lower(), sh.lsb_release("-irs").split()))
   for k, v in OS_MAPPING.iteritems():
     if re.search(k, release):
       return v
 
-  print("Pre-built toolchain archives not available for your platform.")
-  print("Clone and build native toolchain from source using this repository:")
-  print("    https://github.com/cloudera/native-toolchain")
   raise Exception("Could not find package label for OS version: {0}.".format(release))
 
 def download_package(destination, product, version, compiler):
+  remove_existing_package(destination, product, version)
+
   label = get_release_label()
   file_name = "{0}-{1}-{2}-{3}.tar.gz".format(product, version, compiler, label)
   url_path="/{0}/{1}-{2}/{0}-{1}-{2}-{3}.tar.gz".format(product, version, compiler, label)
@@ -70,7 +77,7 @@ def download_package(destination, product, version, compiler):
   print "Extracting {0}".format(file_name)
   sh.tar(z=True, x=True, f=os.path.join(destination, file_name), directory=destination)
   sh.rm(os.path.join(destination, file_name))
-
+  write_version_file(destination, product, version, compiler, label)
 
 def bootstrap(packages):
   """Validates the presence of $IMPALA_HOME and $IMPALA_TOOLCHAIN in the environment. By
@@ -95,12 +102,67 @@ def bootstrap(packages):
   if not os.path.exists(destination):
     os.makedirs(destination)
 
+  if not try_get_release_label():
+    check_custom_toolchain(destination, packages)
+    return
+
   # Detect the compiler
   compiler = "gcc-{0}".format(os.environ["IMPALA_GCC_VERSION"])
 
   for p in packages:
     pkg_name, pkg_version = unpack_name_and_version(p)
+    if check_for_existing_package(destination, pkg_name, pkg_version, compiler):
+      continue
     download_package(destination, pkg_name, pkg_version, compiler)
+
+def package_directory(toolchain_root, pkg_name, pkg_version):
+  dir_name = "{0}-{1}".format(pkg_name, pkg_version)
+  return os.path.join(toolchain_root, dir_name)
+
+def version_file_path(toolchain_root, pkg_name, pkg_version):
+  return os.path.join(package_directory(toolchain_root, pkg_name, pkg_version),
+      "toolchain_package_version.txt")
+
+def check_custom_toolchain(toolchain_root, packages):
+  missing = []
+  for p in packages:
+    pkg_name, pkg_version = unpack_name_and_version(p)
+    pkg_dir = package_directory(toolchain_root, pkg_name, pkg_version)
+    if not os.path.isdir(pkg_dir):
+      missing.append((p, pkg_dir))
+
+  if missing:
+    print("The following packages are not in their expected locations.")
+    for p, pkg_dir in missing:
+      print("  %s (expected directory %s to exist)" % (p, pkg_dir))
+    print("Pre-built toolchain archives not available for your platform.")
+    print("Clone and build native toolchain from source using this repository:")
+    print("    https://github.com/cloudera/native-toolchain")
+    raise Exception("Toolchain bootstrap failed: required packages were missing")
+
+
+def check_for_existing_package(toolchain_root, pkg_name, pkg_version, compiler):
+  """Return true if toolchain_root already contains the package with the correct
+  version and compiler.
+  """
+  version_file = version_file_path(toolchain_root, pkg_name, pkg_version)
+  if not os.path.exists(version_file):
+    return False
+
+  label = get_release_label()
+  pkg_version_string = "{0}-{1}-{2}-{3}".format(pkg_name, pkg_version, compiler, label)
+  with open(version_file) as f:
+    return f.read().strip() == pkg_version_string
+
+def write_version_file(toolchain_root, pkg_name, pkg_version, compiler, label):
+  with open(version_file_path(toolchain_root, pkg_name, pkg_version), 'w') as f:
+    f.write("{0}-{1}-{2}-{3}".format(pkg_name, pkg_version, compiler, label))
+
+def remove_existing_package(toolchain_root, pkg_name, pkg_version):
+  dir_path = package_directory(toolchain_root, pkg_name, pkg_version)
+  if os.path.exists(dir_path):
+    print "Removing existing package directory {0}".format(dir_path)
+    shutil.rmtree(dir_path)
 
 def unpack_name_and_version(package):
   """A package definition is either a string where the version is fetched from the
@@ -118,6 +180,6 @@ def unpack_name_and_version(package):
 
 if __name__ == "__main__":
   packages = ["avro", "boost", "bzip2", "gcc", "gflags", "glog",
-              "gperftools", "gtest", "llvm", ("llvm", "3.7.0"), "lz4", "openldap",
-              "rapidjson", "re2", "snappy", "thrift", "zlib"]
+              "gperftools", "gtest", "llvm", ("llvm", "3.3-p1"), ("llvm", "3.7.0"),
+              "lz4", "openldap", "rapidjson", "re2", "snappy", "thrift", "zlib"]
   bootstrap(packages)
